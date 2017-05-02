@@ -7,6 +7,7 @@ module Data.Functor.Foldable.TH
   , baseRulesType
   , baseRulesCon
   , baseRulesField
+  , baseRulesInline
   ) where
 
 import Control.Applicative as A
@@ -79,11 +80,12 @@ makeBaseFunctorWith rules name = reify name >>= f
     f (TyConI dec) = makePrimForDec rules dec
     f _            = fail "makeBaseFunctor: Expected type constructor name"
 
--- | Rules of renaming data names
+-- | Rules of renaming data names, and derivation configuration
 data BaseRules = BaseRules
     { _baseRulesType  :: Name -> Name
     , _baseRulesCon   :: Name -> Name
     , _baseRulesField :: Name -> Name
+    , _baseRulesInline :: Bool
     }
 
 -- | Default 'BaseRules': append @F@ or @$@ to data type, constructors and field names.
@@ -92,6 +94,7 @@ baseRules = BaseRules
     { _baseRulesType  = toFName
     , _baseRulesCon   = toFName
     , _baseRulesField = toFName
+    , _baseRulesInline = False
     }
 
 -- | How to name the base functor type.
@@ -111,6 +114,10 @@ baseRulesCon f rules = (\x -> rules { _baseRulesCon = x }) <$> f (_baseRulesCon 
 -- Default is to append @F@ or @$@.
 baseRulesField :: Functor f => ((Name -> Name) -> f (Name -> Name)) -> BaseRules -> f BaseRules
 baseRulesField f rules = (\x -> rules { _baseRulesField = x }) <$> f (_baseRulesField rules)
+
+-- | Whether to add inline pragmas to functions in derived instance declarations
+baseRulesInline :: Functor f => (Bool -> f Bool) -> BaseRules -> f BaseRules
+baseRulesInline f rules = (\x -> rules { _baseRulesInline = x }) <$> f (_baseRulesInline rules)
 
 toFName :: Name -> Name
 toFName = mkName . f . nameBase
@@ -138,6 +145,24 @@ makePrimForDec rules dec = case dec of
 
 makePrimForDec' :: BaseRules -> Bool -> Name -> [TyVarBndr] -> [Con] -> DecsQ
 makePrimForDec' rules isNewtype tyName vars cons = do
+
+    let
+      mayInline :: Name -> [Dec]
+      mayInline name =
+          if _baseRulesInline rules
+#if MIN_VERSION_template_haskell(2,8,0)
+          then [PragmaD (InlineP name Inline FunLike AllPhases)]
+#else
+          then [PragmaD
+                (InlineP name
+                 (InlineSpec
+                  True    -- True: inline,  False: noinline
+                  False   -- True: conlike, False: funlike
+                  Nothing -- phase control
+                 ))]
+#endif
+          else []
+
     -- variable parameters
     let vars' = map VarT (typeVars vars)
     -- Name of base functor
@@ -182,17 +207,17 @@ makePrimForDec' rules isNewtype tyName vars cons = do
 
     let projDec = FunD projectValName (mkMorphism id (_baseRulesCon rules) args)
 #if MIN_VERSION_template_haskell(2,11,0)
-    let recursiveDec = InstanceD Nothing [] (ConT recursiveTypeName `AppT` s) [projDec]
+    let recursiveDec = InstanceD Nothing [] (ConT recursiveTypeName `AppT` s) (projDec:mayInline projectValName)
 #else
-    let recursiveDec = InstanceD [] (ConT recursiveTypeName `AppT` s) [projDec]
+    let recursiveDec = InstanceD [] (ConT recursiveTypeName `AppT` s) (projDec:mayInline projectValName)
 #endif
 
     -- instance Corecursive
     let embedDec = FunD embedValName (mkMorphism (_baseRulesCon rules) id args)
 #if MIN_VERSION_template_haskell(2,11,0)
-    let corecursiveDec = InstanceD Nothing [] (ConT corecursiveTypeName `AppT` s) [embedDec]
+    let corecursiveDec = InstanceD Nothing [] (ConT corecursiveTypeName `AppT` s) (embedDec:mayInline embedValName)
 #else
-    let corecursiveDec = InstanceD [] (ConT corecursiveTypeName `AppT` s) [embedDec]
+    let corecursiveDec = InstanceD [] (ConT corecursiveTypeName `AppT` s) (embedDec:mayInline embedValName)
 #endif
 
     -- Combine
